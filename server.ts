@@ -8,19 +8,24 @@ import { createServer as createViteServer } from "vite";
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const resolvedFilename = typeof import.meta !== "undefined" && import.meta.url
+  ? fileURLToPath(import.meta.url)
+  : (typeof __filename !== "undefined" ? __filename : "");
+
+const resolvedDirname = typeof import.meta !== "undefined" && import.meta.url
+  ? path.dirname(resolvedFilename)
+  : (typeof __dirname !== "undefined" ? __dirname : "");
 
 const app = express();
-const PORT = 5000;
+const PORT = 3000;
 
 // Increase payload limit for base64 file uploads
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 // Dynamic persistence folder setup
-const DATA_DIR = path.join(__dirname, "data");
-const UPLOADS_DIR = path.join(__dirname, "uploads");
+const DATA_DIR = path.join(resolvedDirname, "data");
+const UPLOADS_DIR = path.join(resolvedDirname, "uploads");
 
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
