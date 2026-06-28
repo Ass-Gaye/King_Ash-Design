@@ -5,8 +5,9 @@ import { fileURLToPath } from "url";
 import crypto from "crypto";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
-import admin from "firebase-admin";
+import { initializeApp, cert } from "firebase-admin/app";
 import { getFirestore, Firestore } from "firebase-admin/firestore";
+import { GoogleAuth } from "google-auth-library";
 
 dotenv.config();
 
@@ -22,26 +23,77 @@ const PROJECT_ROOT = process.cwd();
 
 // Initialize Firebase Admin with config if available, otherwise default
 let firebaseDb: Firestore | null = null;
-try {
-  const firebaseConfigPath = path.join(PROJECT_ROOT, "firebase-applet-config.json");
-  if (fs.existsSync(firebaseConfigPath)) {
-    const firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, "utf-8"));
-    admin.initializeApp({
-      projectId: firebaseConfig.projectId
-    });
-    if (firebaseConfig.firestoreDatabaseId) {
-      firebaseDb = getFirestore(firebaseConfig.firestoreDatabaseId);
-    } else {
-      firebaseDb = getFirestore();
+
+async function initFirebase() {
+  try {
+    const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
+    const firebaseConfigPath = path.join(PROJECT_ROOT, "firebase-applet-config.json");
+    
+    let hasCredentials = false;
+    let databaseId: string | undefined = undefined;
+
+    // 1. Check if we have a direct service account JSON in env variables
+    if (serviceAccountJson) {
+      try {
+        const serviceAccount = JSON.parse(serviceAccountJson);
+        initializeApp({
+          credential: cert(serviceAccount)
+        });
+        hasCredentials = true;
+        console.log("Firebase Admin initialized with custom service account JSON");
+      } catch (e: any) {
+        console.error("Failed to parse or initialize with FIREBASE_SERVICE_ACCOUNT_JSON:", e.message);
+      }
     }
-    console.log("Firebase Admin initialized with config projectId:", firebaseConfig.projectId, "databaseId:", firebaseConfig.firestoreDatabaseId);
-  } else {
-    admin.initializeApp();
-    firebaseDb = getFirestore();
-    console.log("Firebase Admin initialized with default ADC");
+
+    // 2. Check if we have a config file or can use ADC
+    if (!hasCredentials) {
+      if (fs.existsSync(firebaseConfigPath)) {
+        const firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, "utf-8"));
+        databaseId = firebaseConfig.firestoreDatabaseId;
+
+        // Try to verify if we actually have credentials to access Google services
+        try {
+          const auth = new GoogleAuth();
+          await auth.getCredentials();
+          
+          initializeApp({
+            projectId: firebaseConfig.projectId
+          });
+          hasCredentials = true;
+          console.log("Firebase Admin initialized with config projectId:", firebaseConfig.projectId);
+        } catch (authError: any) {
+          console.warn("Could not load Google Application Default Credentials for config project:", authError.message);
+        }
+      } else {
+        // No config file, try default ADC initialization
+        try {
+          const auth = new GoogleAuth();
+          await auth.getCredentials();
+          
+          initializeApp();
+          hasCredentials = true;
+          console.log("Firebase Admin initialized with default ADC");
+        } catch (authError: any) {
+          console.warn("Could not load default Google Application Default Credentials:", authError.message);
+        }
+      }
+    }
+
+    // 3. Initialize Firestore database if we succeeded in initializing Admin
+    if (hasCredentials) {
+      if (databaseId) {
+        firebaseDb = getFirestore(databaseId);
+      } else {
+        firebaseDb = getFirestore();
+      }
+    } else {
+      console.warn("No valid Google/Firebase credentials found. Falling back to local file-based database.");
+    }
+  } catch (error: any) {
+    console.error("Firebase Admin initialization failed, falling back to local files:", error.message);
+    firebaseDb = null;
   }
-} catch (error) {
-  console.error("Firebase Admin initialization failed, falling back to local files:", error);
 }
 
 const app = express();
@@ -895,6 +947,9 @@ app.get("/api/tracking/:trackingId", async (req, res) => {
 
 // --- Vite Integrations ---
 async function startServer() {
+  // Initialize Firebase Admin with credentials check
+  await initFirebase();
+
   // Sync seed and existing data with Firestore
   await syncWithFirestore();
 
