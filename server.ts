@@ -16,6 +16,8 @@ const resolvedDirname = typeof import.meta !== "undefined" && import.meta.url
   ? path.dirname(resolvedFilename)
   : (typeof __dirname !== "undefined" ? __dirname : "");
 
+const PROJECT_ROOT = process.cwd();
+
 const app = express();
 const PORT = 3000;
 
@@ -24,8 +26,8 @@ app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 // Dynamic persistence folder setup
-const DATA_DIR = path.join(resolvedDirname, "data");
-const UPLOADS_DIR = path.join(resolvedDirname, "uploads");
+const DATA_DIR = path.join(PROJECT_ROOT, "data");
+const UPLOADS_DIR = path.join(PROJECT_ROOT, "uploads");
 
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -33,6 +35,9 @@ if (!fs.existsSync(DATA_DIR)) {
 if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
+
+// Serve static assets from src/assets directly
+app.use("/src/assets", express.static(path.join(PROJECT_ROOT, "src", "assets")));
 
 // Serve uploaded files statically
 app.use("/uploads", express.static(UPLOADS_DIR));
