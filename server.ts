@@ -5,6 +5,8 @@ import { fileURLToPath } from "url";
 import crypto from "crypto";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
+import admin from "firebase-admin";
+import { getFirestore, Firestore } from "firebase-admin/firestore";
 
 dotenv.config();
 
@@ -17,6 +19,30 @@ const resolvedDirname = typeof import.meta !== "undefined" && import.meta.url
   : (typeof __dirname !== "undefined" ? __dirname : "");
 
 const PROJECT_ROOT = process.cwd();
+
+// Initialize Firebase Admin with config if available, otherwise default
+let firebaseDb: Firestore | null = null;
+try {
+  const firebaseConfigPath = path.join(PROJECT_ROOT, "firebase-applet-config.json");
+  if (fs.existsSync(firebaseConfigPath)) {
+    const firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, "utf-8"));
+    admin.initializeApp({
+      projectId: firebaseConfig.projectId
+    });
+    if (firebaseConfig.firestoreDatabaseId) {
+      firebaseDb = getFirestore(firebaseConfig.firestoreDatabaseId);
+    } else {
+      firebaseDb = getFirestore();
+    }
+    console.log("Firebase Admin initialized with config projectId:", firebaseConfig.projectId, "databaseId:", firebaseConfig.firestoreDatabaseId);
+  } else {
+    admin.initializeApp();
+    firebaseDb = getFirestore();
+    console.log("Firebase Admin initialized with default ADC");
+  }
+} catch (error) {
+  console.error("Firebase Admin initialization failed, falling back to local files:", error);
+}
 
 const app = express();
 const PORT = 3000;
@@ -226,6 +252,105 @@ let orders = readData("orders.json", defaultOrders);
 let inquiries = readData("inquiries.json", defaultInquiries);
 let adminUser = readData("admin.json", defaultAdminUser);
 
+// Synchronize with Firestore on startup
+async function syncWithFirestore() {
+  if (!firebaseDb) {
+    console.log("Firestore not initialized, skipping synchronization.");
+    return;
+  }
+  try {
+    console.log("Synchronizing default seed data with Firestore...");
+    
+    // 1. Settings
+    const settingsRef = firebaseDb.collection("settings").doc("main");
+    const settingsSnap = await settingsRef.get();
+    if (!settingsSnap.exists) {
+      await settingsRef.set(defaultSettings);
+      console.log("Seeded settings to Firestore.");
+      settings = defaultSettings;
+    } else {
+      settings = settingsSnap.data() as any;
+      console.log("Loaded settings from Firestore.");
+    }
+
+    // 2. Admin User
+    const adminRef = firebaseDb.collection("admin").doc("user");
+    const adminSnap = await adminRef.get();
+    if (!adminSnap.exists) {
+      await adminRef.set(defaultAdminUser);
+      console.log("Seeded admin user to Firestore.");
+      adminUser = defaultAdminUser;
+    } else {
+      adminUser = adminSnap.data() as any;
+      console.log("Loaded admin user from Firestore.");
+    }
+
+    // 3. Gallery
+    const galleryColl = firebaseDb.collection("gallery");
+    const gallerySnap = await galleryColl.limit(1).get();
+    if (gallerySnap.empty) {
+      for (const item of defaultGallery) {
+        await galleryColl.doc(item.id).set(item);
+      }
+      console.log("Seeded gallery to Firestore.");
+      gallery = [...defaultGallery];
+    } else {
+      const all = await galleryColl.orderBy("createdAt", "desc").get();
+      gallery = all.docs.map(doc => doc.data() as any);
+      console.log(`Loaded ${gallery.length} gallery items from Firestore.`);
+    }
+
+    // 4. Testimonials
+    const testimonialsColl = firebaseDb.collection("testimonials");
+    const testimonialsSnap = await testimonialsColl.limit(1).get();
+    if (testimonialsSnap.empty) {
+      for (const t of defaultTestimonials) {
+        await testimonialsColl.doc(t.id).set(t);
+      }
+      console.log("Seeded testimonials to Firestore.");
+      testimonials = [...defaultTestimonials];
+    } else {
+      const all = await testimonialsColl.orderBy("createdAt", "desc").get();
+      testimonials = all.docs.map(doc => doc.data() as any);
+      console.log(`Loaded ${testimonials.length} testimonials from Firestore.`);
+    }
+
+    // 5. Inquiries
+    const inquiriesColl = firebaseDb.collection("inquiries");
+    const inquiriesSnap = await inquiriesColl.limit(1).get();
+    if (inquiriesSnap.empty) {
+      for (const i of defaultInquiries) {
+        await inquiriesColl.doc(i.id).set(i);
+      }
+      console.log("Seeded inquiries to Firestore.");
+      inquiries = [...defaultInquiries];
+    } else {
+      const all = await inquiriesColl.orderBy("createdAt", "desc").get();
+      inquiries = all.docs.map(doc => doc.data() as any);
+      console.log(`Loaded ${inquiries.length} inquiries from Firestore.`);
+    }
+
+    // 6. Orders
+    const ordersColl = firebaseDb.collection("orders");
+    const ordersSnap = await ordersColl.limit(1).get();
+    if (ordersSnap.empty) {
+      for (const o of defaultOrders) {
+        await ordersColl.doc(o.id).set(o);
+      }
+      console.log("Seeded orders to Firestore.");
+      orders = [...defaultOrders];
+    } else {
+      const all = await ordersColl.orderBy("createdAt", "desc").get();
+      orders = all.docs.map(doc => doc.data() as any);
+      console.log(`Loaded ${orders.length} orders from Firestore.`);
+    }
+
+  } catch (error) {
+    console.warn("Failed to synchronize with Firestore. Disabling Firestore integration and falling back to local file-based database. This is expected if GCP service account permissions are pending or not configured in this preview environment.", error);
+    firebaseDb = null;
+  }
+}
+
 // Secure Session Tokens store (in-memory)
 const activeSessions = new Map<string, { email: string; expiresAt: number }>();
 
@@ -251,11 +376,23 @@ function requireAuth(req: express.Request, res: express.Response, next: express.
 // --- API Endpoints ---
 
 // 1. AUTHENTICATION
-app.post("/api/auth/login", (req, res) => {
+app.post("/api/auth/login", async (req, res) => {
   const { email, password } = req.body;
   
   if (!email || !password) {
     return res.status(400).json({ error: "Email and password are required." });
+  }
+
+  // Load latest adminUser from Firestore if available
+  if (firebaseDb) {
+    try {
+      const adminSnap = await firebaseDb.collection("admin").doc("user").get();
+      if (adminSnap.exists) {
+        adminUser = adminSnap.data() as any;
+      }
+    } catch (e) {
+      console.error("Error reading admin user from Firestore", e);
+    }
   }
 
   const inputHash = crypto.createHash("sha256").update(password).digest("hex");
@@ -302,7 +439,7 @@ app.get("/api/auth/session", (req, res) => {
   res.json({ authenticated: true, admin: { email: session.email } });
 });
 
-app.post("/api/auth/reset-password", requireAuth, (req, res) => {
+app.post("/api/auth/reset-password", requireAuth, async (req, res) => {
   const { currentPassword, newPassword } = req.body;
   if (!currentPassword || !newPassword) {
     return res.status(400).json({ error: "All password fields are required." });
@@ -315,27 +452,59 @@ app.post("/api/auth/reset-password", requireAuth, (req, res) => {
 
   adminUser.passwordHash = crypto.createHash("sha256").update(newPassword).digest("hex");
   writeData("admin.json", adminUser);
+  if (firebaseDb) {
+    try {
+      await firebaseDb.collection("admin").doc("user").set(adminUser);
+    } catch (e) {
+      console.error("Error writing updated admin user to Firestore", e);
+    }
+  }
   
   res.json({ success: true, message: "Password updated successfully." });
 });
 
 // 2. SETTINGS / CONTENT MANAGEMENT
-app.get("/api/settings", (req, res) => {
+app.get("/api/settings", async (req, res) => {
+  if (firebaseDb) {
+    try {
+      const settingsSnap = await firebaseDb.collection("settings").doc("main").get();
+      if (settingsSnap.exists) {
+        settings = settingsSnap.data() as any;
+      }
+    } catch (e) {
+      console.error("Error fetching settings from Firestore", e);
+    }
+  }
   res.json(settings);
 });
 
-app.post("/api/settings", requireAuth, (req, res) => {
+app.post("/api/settings", requireAuth, async (req, res) => {
   settings = { ...settings, ...req.body };
   writeData("settings.json", settings);
+  if (firebaseDb) {
+    try {
+      await firebaseDb.collection("settings").doc("main").set(settings);
+    } catch (e) {
+      console.error("Error writing settings to Firestore", e);
+    }
+  }
   res.json({ success: true, settings });
 });
 
 // 3. GALLERY MANAGEMENT
-app.get("/api/gallery", (req, res) => {
+app.get("/api/gallery", async (req, res) => {
+  if (firebaseDb) {
+    try {
+      const snap = await firebaseDb.collection("gallery").orderBy("createdAt", "desc").get();
+      gallery = snap.docs.map(doc => doc.data() as any);
+    } catch (e) {
+      console.error("Error reading gallery from Firestore", e);
+    }
+  }
   res.json(gallery);
 });
 
-app.post("/api/gallery", requireAuth, (req, res) => {
+app.post("/api/gallery", requireAuth, async (req, res) => {
   const { title, description, category, imageUrl, featured, base64Image } = req.body;
   
   if (!title || !category) {
@@ -376,10 +545,17 @@ app.post("/api/gallery", requireAuth, (req, res) => {
 
   gallery.unshift(newItem);
   writeData("gallery.json", gallery);
+  if (firebaseDb) {
+    try {
+      await firebaseDb.collection("gallery").doc(newItem.id).set(newItem);
+    } catch (e) {
+      console.error("Error writing gallery item to Firestore", e);
+    }
+  }
   res.status(201).json(newItem);
 });
 
-app.delete("/api/gallery/:id", requireAuth, (req, res) => {
+app.delete("/api/gallery/:id", requireAuth, async (req, res) => {
   const { id } = req.params;
   const index = gallery.findIndex(item => item.id === id);
   if (index === -1) {
@@ -398,15 +574,30 @@ app.delete("/api/gallery/:id", requireAuth, (req, res) => {
 
   gallery.splice(index, 1);
   writeData("gallery.json", gallery);
+  if (firebaseDb) {
+    try {
+      await firebaseDb.collection("gallery").doc(id).delete();
+    } catch (e) {
+      console.error("Error deleting gallery item from Firestore", e);
+    }
+  }
   res.json({ success: true, message: "Gallery item deleted" });
 });
 
 // 4. TESTIMONIALS
-app.get("/api/testimonials", (req, res) => {
+app.get("/api/testimonials", async (req, res) => {
+  if (firebaseDb) {
+    try {
+      const snap = await firebaseDb.collection("testimonials").orderBy("createdAt", "desc").get();
+      testimonials = snap.docs.map(doc => doc.data() as any);
+    } catch (e) {
+      console.error("Error reading testimonials from Firestore", e);
+    }
+  }
   res.json(testimonials);
 });
 
-app.post("/api/testimonials", (req, res) => {
+app.post("/api/testimonials", async (req, res) => {
   const { name, role, content, rating } = req.body;
   if (!name || !content || !rating) {
     return res.status(400).json({ error: "Name, rating and review content are required" });
@@ -421,22 +612,44 @@ app.post("/api/testimonials", (req, res) => {
   };
   testimonials.unshift(newTestimonial);
   writeData("testimonials.json", testimonials);
+  if (firebaseDb) {
+    try {
+      await firebaseDb.collection("testimonials").doc(newTestimonial.id).set(newTestimonial);
+    } catch (e) {
+      console.error("Error writing testimonial to Firestore", e);
+    }
+  }
   res.status(201).json(newTestimonial);
 });
 
-app.delete("/api/testimonials/:id", requireAuth, (req, res) => {
+app.delete("/api/testimonials/:id", requireAuth, async (req, res) => {
   const { id } = req.params;
   testimonials = testimonials.filter(t => t.id !== id);
   writeData("testimonials.json", testimonials);
+  if (firebaseDb) {
+    try {
+      await firebaseDb.collection("testimonials").doc(id).delete();
+    } catch (e) {
+      console.error("Error deleting testimonial from Firestore", e);
+    }
+  }
   res.json({ success: true });
 });
 
 // 5. INQUIRIES
-app.get("/api/inquiries", requireAuth, (req, res) => {
+app.get("/api/inquiries", requireAuth, async (req, res) => {
+  if (firebaseDb) {
+    try {
+      const snap = await firebaseDb.collection("inquiries").orderBy("createdAt", "desc").get();
+      inquiries = snap.docs.map(doc => doc.data() as any);
+    } catch (e) {
+      console.error("Error reading inquiries from Firestore", e);
+    }
+  }
   res.json(inquiries);
 });
 
-app.post("/api/inquiries", (req, res) => {
+app.post("/api/inquiries", async (req, res) => {
   const { name, email, phone, subject, message } = req.body;
   if (!name || !email || !message) {
     return res.status(400).json({ error: "Name, email and message are required" });
@@ -453,10 +666,17 @@ app.post("/api/inquiries", (req, res) => {
   };
   inquiries.unshift(newInquiry);
   writeData("inquiries.json", inquiries);
+  if (firebaseDb) {
+    try {
+      await firebaseDb.collection("inquiries").doc(newInquiry.id).set(newInquiry);
+    } catch (e) {
+      console.error("Error writing inquiry to Firestore", e);
+    }
+  }
   res.status(201).json({ success: true, inquiry: newInquiry });
 });
 
-app.patch("/api/inquiries/:id", requireAuth, (req, res) => {
+app.patch("/api/inquiries/:id", requireAuth, async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
   const inquiry = inquiries.find(i => i.id === id);
@@ -466,23 +686,45 @@ app.patch("/api/inquiries/:id", requireAuth, (req, res) => {
   if (status) {
     inquiry.status = status;
     writeData("inquiries.json", inquiries);
+    if (firebaseDb) {
+      try {
+        await firebaseDb.collection("inquiries").doc(id).update({ status });
+      } catch (e) {
+        console.error("Error updating inquiry in Firestore", e);
+      }
+    }
   }
   res.json(inquiry);
 });
 
-app.delete("/api/inquiries/:id", requireAuth, (req, res) => {
+app.delete("/api/inquiries/:id", requireAuth, async (req, res) => {
   const { id } = req.params;
   inquiries = inquiries.filter(i => i.id !== id);
   writeData("inquiries.json", inquiries);
+  if (firebaseDb) {
+    try {
+      await firebaseDb.collection("inquiries").doc(id).delete();
+    } catch (e) {
+      console.error("Error deleting inquiry from Firestore", e);
+    }
+  }
   res.json({ success: true });
 });
 
 // 6. CUSTOM ORDERS
-app.get("/api/orders", requireAuth, (req, res) => {
+app.get("/api/orders", requireAuth, async (req, res) => {
+  if (firebaseDb) {
+    try {
+      const snap = await firebaseDb.collection("orders").orderBy("createdAt", "desc").get();
+      orders = snap.docs.map(doc => doc.data() as any);
+    } catch (e) {
+      console.error("Error reading orders from Firestore", e);
+    }
+  }
   res.json(orders);
 });
 
-app.post("/api/orders", (req, res) => {
+app.post("/api/orders", async (req, res) => {
   const {
     fullName, email, phoneNumber, deliveryAddress, garmentType, gender,
     fabricPreference, sizeType, chest, waist, hips, shoulder, sleeves,
@@ -537,12 +779,12 @@ app.post("/api/orders", (req, res) => {
     gender: gender || "Male",
     fabricPreference: fabricPreference || "",
     sizeType: sizeType || "Standard",
-    chest,
-    waist,
-    hips,
-    shoulder,
-    sleeves,
-    length,
+    chest: chest || "",
+    waist: waist || "",
+    hips: hips || "",
+    shoulder: shoulder || "",
+    sleeves: sleeves || "",
+    length: length || "",
     customSizeNotes: customSizeNotes || "",
     eventDate: eventDate || "",
     preferredDeliveryDate: preferredDeliveryDate || "",
@@ -555,10 +797,17 @@ app.post("/api/orders", (req, res) => {
 
   orders.unshift(newOrder);
   writeData("orders.json", orders);
+  if (firebaseDb) {
+    try {
+      await firebaseDb.collection("orders").doc(newOrder.id).set(newOrder);
+    } catch (e) {
+      console.error("Error writing order to Firestore", e);
+    }
+  }
   res.status(201).json({ success: true, order: newOrder });
 });
 
-app.patch("/api/orders/:id", requireAuth, (req, res) => {
+app.patch("/api/orders/:id", requireAuth, async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
   const order = orders.find(o => o.id === id);
@@ -568,11 +817,18 @@ app.patch("/api/orders/:id", requireAuth, (req, res) => {
   if (status) {
     order.status = status;
     writeData("orders.json", orders);
+    if (firebaseDb) {
+      try {
+        await firebaseDb.collection("orders").doc(id).update({ status });
+      } catch (e) {
+        console.error("Error updating order status in Firestore", e);
+      }
+    }
   }
   res.json(order);
 });
 
-app.delete("/api/orders/:id", requireAuth, (req, res) => {
+app.delete("/api/orders/:id", requireAuth, async (req, res) => {
   const { id } = req.params;
   const index = orders.findIndex(o => o.id === id);
   if (index === -1) {
@@ -595,14 +851,35 @@ app.delete("/api/orders/:id", requireAuth, (req, res) => {
 
   orders.splice(index, 1);
   writeData("orders.json", orders);
+  if (firebaseDb) {
+    try {
+      await firebaseDb.collection("orders").doc(id).delete();
+    } catch (e) {
+      console.error("Error deleting order from Firestore", e);
+    }
+  }
   res.json({ success: true });
 });
 
 
 // 7. ORDER TRACKING (PUBLIC API)
-app.get("/api/tracking/:trackingId", (req, res) => {
+app.get("/api/tracking/:trackingId", async (req, res) => {
   const { trackingId } = req.params;
-  const order = orders.find(o => o.trackingId.toLowerCase() === trackingId.trim().toLowerCase());
+  const searchId = trackingId.trim().toLowerCase();
+  
+  let order = orders.find(o => o.trackingId.toLowerCase() === searchId);
+  
+  if (firebaseDb) {
+    try {
+      const snap = await firebaseDb.collection("orders").where("trackingId", "==", trackingId.trim()).get();
+      if (!snap.empty) {
+        order = snap.docs[0].data() as any;
+      }
+    } catch (e) {
+      console.error("Error tracking order from Firestore", e);
+    }
+  }
+  
   if (!order) {
     return res.status(404).json({ error: "No order found with this tracking ID." });
   }
@@ -618,6 +895,9 @@ app.get("/api/tracking/:trackingId", (req, res) => {
 
 // --- Vite Integrations ---
 async function startServer() {
+  // Sync seed and existing data with Firestore
+  await syncWithFirestore();
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },

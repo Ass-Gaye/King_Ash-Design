@@ -1,0 +1,6 @@
+{
+  "firestore": {
+    "rules": "firestore.rules",
+    "database": "ai-studio-kingash-ee61d143-65cf-40fb-a2ea-ff6a55a5651e"
+  }
+}
