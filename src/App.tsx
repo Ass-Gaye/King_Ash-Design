@@ -101,6 +101,59 @@ export default function App() {
     fetchAdminLogs();
   }, [isAdminLoggedIn]);
 
+  // Establish real-time Server-Sent Events (SSE) listener for orders and inquiries
+  useEffect(() => {
+    if (!isAdminLoggedIn) return;
+
+    const token = localStorage.getItem("king_ash_admin_token");
+    if (!token) return;
+
+    const eventSource = new EventSource(`/api/admin/sse-updates?token=${encodeURIComponent(token)}`);
+
+    eventSource.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload.type === "orders") {
+          if (payload.action === "create") {
+            setOrders((prev) => {
+              if (prev.some((o) => o.id === payload.data.id)) return prev;
+              return [payload.data, ...prev];
+            });
+          } else if (payload.action === "update") {
+            setOrders((prev) =>
+              prev.map((o) => (o.id === payload.id ? { ...o, status: payload.status } : o))
+            );
+          } else if (payload.action === "delete") {
+            setOrders((prev) => prev.filter((o) => o.id !== payload.id));
+          }
+        } else if (payload.type === "inquiries") {
+          if (payload.action === "create") {
+            setInquiries((prev) => {
+              if (prev.some((i) => i.id === payload.data.id)) return prev;
+              return [payload.data, ...prev];
+            });
+          } else if (payload.action === "update") {
+            setInquiries((prev) =>
+              prev.map((i) => (i.id === payload.id ? { ...i, status: payload.status } : i))
+            );
+          } else if (payload.action === "delete") {
+            setInquiries((prev) => prev.filter((i) => i.id !== payload.id));
+          }
+        }
+      } catch (err) {
+        console.error("Failed to parse SSE event", err);
+      }
+    };
+
+    eventSource.onerror = (err) => {
+      console.warn("SSE connection encountered error:", err);
+    };
+
+    return () => {
+      eventSource.close();
+    };
+  }, [isAdminLoggedIn]);
+
   // Section smooth scroll helper
   const handleNavigate = (sectionId: string) => {
     setCurrentSection(sectionId);

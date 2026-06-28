@@ -3,6 +3,7 @@ import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
+import { EventEmitter } from "events";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
 import { initializeApp, cert } from "firebase-admin/app";
@@ -95,6 +96,9 @@ async function initFirebase() {
     firebaseDb = null;
   }
 }
+
+const adminUpdatesEmitter = new EventEmitter();
+adminUpdatesEmitter.setMaxListeners(100);
 
 const app = express();
 const PORT = 3000;
@@ -408,11 +412,17 @@ const activeSessions = new Map<string, { email: string; expiresAt: number }>();
 
 // Auth Middleware
 function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  let token = "";
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    token = authHeader.split(" ")[1];
+  } else if (req.query.token && typeof req.query.token === "string") {
+    token = req.query.token;
+  }
+
+  if (!token) {
     return res.status(401).json({ error: "Unauthorized. Missing authentication token." });
   }
-  const token = authHeader.split(" ")[1];
   const session = activeSessions.get(token);
   
   if (!session || session.expiresAt < Date.now()) {
@@ -725,6 +735,7 @@ app.post("/api/inquiries", async (req, res) => {
       console.error("Error writing inquiry to Firestore", e);
     }
   }
+  adminUpdatesEmitter.emit("update", { type: "inquiries", action: "create", data: newInquiry });
   res.status(201).json({ success: true, inquiry: newInquiry });
 });
 
@@ -745,6 +756,7 @@ app.patch("/api/inquiries/:id", requireAuth, async (req, res) => {
         console.error("Error updating inquiry in Firestore", e);
       }
     }
+    adminUpdatesEmitter.emit("update", { type: "inquiries", action: "update", id, status });
   }
   res.json(inquiry);
 });
@@ -760,6 +772,7 @@ app.delete("/api/inquiries/:id", requireAuth, async (req, res) => {
       console.error("Error deleting inquiry from Firestore", e);
     }
   }
+  adminUpdatesEmitter.emit("update", { type: "inquiries", action: "delete", id });
   res.json({ success: true });
 });
 
@@ -856,6 +869,7 @@ app.post("/api/orders", async (req, res) => {
       console.error("Error writing order to Firestore", e);
     }
   }
+  adminUpdatesEmitter.emit("update", { type: "orders", action: "create", data: newOrder });
   res.status(201).json({ success: true, order: newOrder });
 });
 
@@ -876,6 +890,7 @@ app.patch("/api/orders/:id", requireAuth, async (req, res) => {
         console.error("Error updating order status in Firestore", e);
       }
     }
+    adminUpdatesEmitter.emit("update", { type: "orders", action: "update", id, status });
   }
   res.json(order);
 });
@@ -910,7 +925,34 @@ app.delete("/api/orders/:id", requireAuth, async (req, res) => {
       console.error("Error deleting order from Firestore", e);
     }
   }
+  adminUpdatesEmitter.emit("update", { type: "orders", action: "delete", id });
   res.json({ success: true });
+});
+
+app.get("/api/admin/sse-updates", requireAuth, (req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive"
+  });
+
+  // Keep connection alive with initial payload
+  res.write("data: {\"type\":\"connected\"}\n\n");
+
+  const listener = (data: any) => {
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  adminUpdatesEmitter.on("update", listener);
+
+  const keepAliveInterval = setInterval(() => {
+    res.write("data: {\"type\":\"ping\"}\n\n");
+  }, 25000);
+
+  req.on("close", () => {
+    adminUpdatesEmitter.off("update", listener);
+    clearInterval(keepAliveInterval);
+  });
 });
 
 
