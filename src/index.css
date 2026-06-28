@@ -1,0 +1,71 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Outfit", "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Playfair Display", Georgia, serif;
+  --font-mono: "Fira Code", ui-monospace, SFMono-Regular, monospace;
+
+  /* Premium Luxury Palette */
+  --color-gold: #DFB76C;         /* Warm premium champagne/satin gold */
+  --color-gold-hover: #F8E7C5;   /* Radiant glistening white-gold cream */
+  --color-gold-dark: #A67D38;    /* Deep heritage brass/bronze gold */
+  --color-burgundy-deep: #2C0712; /* Luxurious velveteen royal burgundy */
+  --color-burgundy-dark: #130206; /* Dark palace obsidian wine */
+  --color-bronze: #8F6D4F;       /* Sartorial sand-bronze thread */
+  --color-charcoal: #0B0B0C;     /* Ultra premium deep obsidian-charcoal */
+  --color-onyx: #050506;         /* Purest luxury deep space black */
+}
+
+@layer base {
+  body {
+    background-color: var(--color-onyx);
+    color: #F3F4F6;
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-serif);
+  }
+}
+
+/* Custom Elegant Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-onyx);
+}
+::-webkit-scrollbar-thumb {
+  background: #1A1A1E;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-gold);
+}
+
+/* Gold Glow Utility */
+.gold-glow {
+  box-shadow: 0 0 15px rgba(212, 175, 55, 0.15);
+}
+.gold-glow-hover:hover {
+  box-shadow: 0 0 25px rgba(212, 175, 55, 0.35);
+}
+
+/* Elegant Text Shimmer */
+.gold-text-shimmer {
+  background: linear-gradient(to right, #AA7C11 0%, #F3E5AB 50%, #AA7C11 100%);
+  background-size: 200% auto;
+  color: transparent;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: shine 6s linear infinite;
+}
+
+@keyframes shine {
+  to {
+    background-position: 200% center;
+  }
+}

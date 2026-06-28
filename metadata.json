@@ -1,0 +1,6 @@
+{
+  "name": "King Ash",
+  "description": "Premium luxury fashion tailoring and couture website for King Ash in Latrikunda Sabiji, The Gambia, featuring full custom order booking, WhatsApp dispatch, custom measurements, and administrative client dashboards.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
